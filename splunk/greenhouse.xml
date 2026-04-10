@@ -1,0 +1,899 @@
+<form version="1.1" theme="light">
+  <label>Greenhouse Operations Dashboard</label>
+
+  <fieldset submitButton="false">
+    <input type="time" token="time_tok">
+      <label>Time Range</label>
+      <default>
+        <earliest>-24h@h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+  </fieldset>
+
+  <!-- =========================
+       BASE SEARCHES
+       ========================= -->
+
+  <search id="base_greenhouse">
+    <query>
+      index=greenhouse sourcetype="greenhouse:log"
+      | rex field=_raw "-\s(?&lt;temp_f&gt;\d+(?:\.\d+)?)°F\s(?&lt;rh&gt;\d+(?:\.\d+)?)%"
+      | eval temp_f=tonumber(temp_f), rh=tonumber(rh)
+      | eval temp_c=(temp_f-32)*5/9
+      | eval svp=0.6108*exp((17.27*temp_c)/(temp_c+237.3))
+      | eval vpd=(1-rh/100)*svp
+      | eval dewpoint_c=(243.04*(log(rh/100)+((17.625*temp_c)/(243.04+temp_c))))/(17.625-log(rh/100)-((17.625*temp_c)/(243.04+temp_c)))
+      | eval dewpoint_f=(dewpoint_c*9/5)+32
+      | eval temp_f=round(temp_f,1), rh=round(rh,1), vpd=round(vpd,2), dewpoint_f=round(dewpoint_f,1)
+    </query>
+    <earliest>$time_tok.earliest$</earliest>
+    <latest>$time_tok.latest$</latest>
+  </search>
+
+  <search id="base_greenhouse_today">
+    <query>
+      index=greenhouse sourcetype="greenhouse:log" earliest=@d
+      | rex field=_raw "-\s(?&lt;temp_f&gt;\d+(?:\.\d+)?)°F\s(?&lt;rh&gt;\d+(?:\.\d+)?)%"
+      | eval temp_f=tonumber(temp_f), rh=tonumber(rh)
+      | eval temp_c=(temp_f-32)*5/9
+      | eval svp=0.6108*exp((17.27*temp_c)/(temp_c+237.3))
+      | eval vpd=(1-rh/100)*svp
+      | eval temp_f=round(temp_f,1), rh=round(rh,1), vpd=round(vpd,2)
+    </query>
+    <earliest>@d</earliest>
+    <latest>now</latest>
+  </search>
+
+  <search id="base_outdoor">
+    <query>
+      index=greenhouse sourcetype="greenhouse:api:json"
+      | eval outdoor_temp_f=tonumber(weather_temp_f)
+      | eval outdoor_feelslike_f=tonumber(weather_feelslike_f)
+      | eval outdoor_humidity=tonumber(weather_humidity)
+      | eval outdoor_wind_mph=tonumber(weather_wind_mph)
+      | eval outdoor_uv=tonumber(weather_uv_index)
+      | eval outdoor_pressure_in=tonumber(weather_pressure_in)
+      | eval outdoor_cloudcover=tonumber(weather_cloudcover)
+    </query>
+    <earliest>$time_tok.earliest$</earliest>
+    <latest>$time_tok.latest$</latest>
+  </search>
+
+  <search id="base_compare">
+    <query>
+      index=greenhouse sourcetype="greenhouse:log"
+      | rex field=_raw "-\s(?&lt;temp_f&gt;\d+(?:\.\d+)?)°F\s(?&lt;rh&gt;\d+(?:\.\d+)?)%"
+      | eval greenhouse_temp_f=tonumber(temp_f), greenhouse_rh=tonumber(rh)
+      | bin _time span=15m
+      | stats avg(greenhouse_temp_f) as greenhouse_temp avg(greenhouse_rh) as greenhouse_rh by _time
+      | appendcols [
+          search index=greenhouse sourcetype="greenhouse:api:json"
+          | bin _time span=15m
+          | stats avg(weather_temp_f) as outdoor_temp avg(weather_humidity) as outdoor_rh by _time
+        ]
+      | eval temp_delta=round(greenhouse_temp-outdoor_temp,2)
+      | eval rh_delta=round(greenhouse_rh-outdoor_rh,2)
+    </query>
+    <earliest>$time_tok.earliest$</earliest>
+    <latest>$time_tok.latest$</latest>
+  </search>
+
+  <!-- =========================
+       KPI ROW
+       ========================= -->
+
+  <row>
+    <panel>
+      <single>
+        <title>Greenhouse Temp</title>
+        <search base="base_greenhouse">
+          <query>| stats latest(temp_f) as value | fields value</query>
+        </search>
+        <option name="unit">°F</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0xd41f1f","0xcba700","0x118832","0xdc4e41"]</option>
+        <option name="rangeValues">[60,68,90]</option>
+        <option name="useColors">1</option>
+      </single>
+    </panel>
+
+    <panel>
+      <single>
+        <title>Humidity</title>
+        <search base="base_greenhouse">
+          <query>| stats latest(rh) as value | fields value</query>
+        </search>
+        <option name="unit">%</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0xd41f1f","0xcba700","0x118832","0xf1813f","0xdc4e41"]</option>
+        <option name="rangeValues">[30,40,75,85]</option>
+        <option name="useColors">1</option>
+      </single>
+    </panel>
+
+    <panel>
+      <single>
+        <title>VPD</title>
+        <search base="base_greenhouse">
+          <query>| stats latest(vpd) as value | fields value</query>
+        </search>
+        <option name="unit">kPa</option>
+        <option name="numberPrecision">0.00</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0xdc4e41","0xf8be34","0x118832","0xf1813f","#dc4e41"]</option>
+        <option name="rangeValues">[0.5,0.8,1.2,1.5]</option>
+        <option name="useColors">1</option>
+      </single>
+    </panel>
+
+    <panel>
+      <single>
+        <title>Dew Point</title>
+        <search base="base_greenhouse">
+          <query>| stats latest(dewpoint_f) as value | fields value</query>
+        </search>
+        <option name="unit">°F</option>
+      </single>
+    </panel>
+
+    <panel>
+      <single>
+        <title>Sensor Age</title>
+        <search>
+          <query>
+            index=greenhouse sourcetype="greenhouse:log"
+            | stats latest(_time) as last_seen
+            | eval value=round((now()-last_seen)/60,1)
+            | fields value
+          </query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="unit">min</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x118832","0xf8be34","#dc4e41"]</option>
+        <option name="rangeValues">[2,5]</option>
+        <option name="useColors">1</option>
+      </single>
+    </panel>
+
+    <panel>
+      <single>
+        <title>Temp Delta vs Outdoor</title>
+        <search base="base_compare">
+          <query>| stats latest(temp_delta) as value | fields value</query>
+        </search>
+        <option name="unit">°F</option>
+      </single>
+    </panel>
+  </row>
+
+  <!-- =========================
+       ALARM ROW
+       ========================= -->
+
+  <row>
+    <panel>
+      <single>
+        <title>Temperature Alarm</title>
+        <search base="base_greenhouse">
+          <query>
+            | stats latest(temp_f) as temp
+            | eval value=case(
+                temp&lt;45,"LOW TEMP ALERT",
+                temp&gt;95,"HIGH TEMP ALERT",
+                true(),"NORMAL"
+              )
+            | table value
+          </query>
+        </search>
+        <option name="colorMode">block</option>
+        <option name="mapping.type">value</option>
+        <option name="rangeColors">["0x118832"]</option>
+        <option name="useColors">1</option>
+      </single>
+    </panel>
+
+    <panel>
+      <single>
+        <title>Humidity Alarm</title>
+        <search base="base_greenhouse">
+          <query>
+            | stats latest(rh) as rh
+            | eval value=case(
+                rh&lt;35,"LOW HUMIDITY ALERT",
+                rh&gt;90,"HIGH HUMIDITY ALERT",
+                true(),"NORMAL"
+              )
+            | table value
+          </query>
+        </search>
+        <option name="colorMode">block</option>
+        <option name="useColors">1</option>
+      </single>
+    </panel>
+
+    <panel>
+      <single>
+        <title>Dew Point Spread</title>
+        <search base="base_greenhouse">
+          <query>
+            | stats latest(temp_f) as temp latest(dewpoint_f) as dew
+            | eval value=round(temp-dew,1)
+            | fields value
+          </query>
+        </search>
+        <option name="unit">°F</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0xdc4e41","0xf8be34","0x118832","0x53a051"]</option>
+        <option name="rangeValues">[3,5,10]</option>
+        <option name="useColors">1</option>
+      </single>
+    </panel>
+  </row>
+
+  <!-- =========================
+       TODAY SUMMARY
+       ========================= -->
+
+  <row>
+    <panel>
+      <table>
+        <title>Today Summary</title>
+        <search base="base_greenhouse_today">
+          <query>
+            | stats latest(temp_f) as "Temp Now (°F)"
+                    min(temp_f) as "Temp Low (°F)"
+                    max(temp_f) as "Temp High (°F)"
+                    latest(rh) as "RH Now (%)"
+                    min(rh) as "RH Low (%)"
+                    max(rh) as "RH High (%)"
+                    latest(vpd) as "VPD Now (kPa)"
+                    min(vpd) as "VPD Low (kPa)"
+                    max(vpd) as "VPD High (kPa)"
+          </query>
+        </search>
+        <option name="count">1</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+  <!-- =========================
+       TRENDS
+       ========================= -->
+
+  <row>
+    <panel>
+      <chart>
+        <title>Temperature Trend</title>
+        <search base="base_greenhouse">
+          <query>| timechart span=5m avg(temp_f) as Temperature</query>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+
+    <panel>
+      <chart>
+        <title>Humidity Trend</title>
+        <search base="base_greenhouse">
+          <query>| timechart span=5m avg(rh) as Humidity</query>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <chart>
+        <title>VPD Trend</title>
+        <search base="base_greenhouse">
+          <query>| timechart span=15m avg(vpd) as VPD</query>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+
+    <panel>
+      <chart>
+        <title>Dew Point Trend</title>
+        <search base="base_greenhouse">
+          <query>| timechart span=15m avg(dewpoint_f) as "Dew Point"</query>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+
+  <!-- =========================
+       DAILY / STABILITY
+       ========================= -->
+
+  <row>
+    <panel>
+      <chart>
+        <title>Daily Temperature High / Low / Avg (7d)</title>
+        <search>
+          <query>
+            index=greenhouse sourcetype="greenhouse:log" earliest=-7d@d latest=now
+            | rex field=_raw "-\s(?&lt;temp_f&gt;\d+(?:\.\d+)?)°F\s(?&lt;rh&gt;\d+(?:\.\d+)?)%"
+            | eval temp_f=tonumber(temp_f)
+            | timechart span=1d min(temp_f) as Low max(temp_f) as High avg(temp_f) as Avg
+          </query>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+
+    <panel>
+      <single>
+        <title>24h Stability Score</title>
+        <search>
+          <query>
+            index=greenhouse sourcetype="greenhouse:log" earliest=-24h
+            | rex field=_raw "-\s(?&lt;temp_f&gt;\d+(?:\.\d+)?)°F\s(?&lt;rh&gt;\d+(?:\.\d+)?)%"
+            | eval temp_f=tonumber(temp_f), rh=tonumber(rh)
+            | stats stdev(temp_f) as temp_sd stdev(rh) as rh_sd
+            | eval value=round(100 - ((temp_sd*4) + (rh_sd*1.2)),1)
+            | eval value=if(value&lt;0,0,value)
+            | fields value
+          </query>
+        </search>
+        <option name="unit">/100</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0xdc4e41","0xf8be34","0x118832"]</option>
+        <option name="rangeValues">[50,75]</option>
+        <option name="useColors">1</option>
+      </single>
+    </panel>
+  </row>
+
+  <!-- =========================
+       OUTDOOR / DELTAS
+       ========================= -->
+
+  <row>
+    <panel>
+      <chart>
+        <title>Greenhouse vs Outdoor Temperature</title>
+        <search base="base_compare">
+          <query>| fields _time greenhouse_temp outdoor_temp</query>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+
+    <panel>
+      <chart>
+        <title>Greenhouse vs Outdoor Humidity</title>
+        <search base="base_compare">
+          <query>| fields _time greenhouse_rh outdoor_rh</query>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <chart>
+        <title>Temperature Delta vs Outdoor</title>
+        <search base="base_compare">
+          <query>| fields _time temp_delta</query>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+
+    <panel>
+      <chart>
+        <title>Humidity Delta vs Outdoor</title>
+        <search base="base_compare">
+          <query>| fields _time rh_delta</query>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+
+  <!-- =========================
+       PLANT PANELS
+       ========================= -->
+
+  <row>
+    <panel>
+      <single>
+        <title>Plants In VPD Range</title>
+        <search>
+          <query>
+            index=greenhouse sourcetype="greenhouse:log" earliest=-2h
+            | rex field=_raw "-\s(?&lt;temp_f&gt;\d+(?:\.\d+)?)°F\s(?&lt;rh&gt;\d+(?:\.\d+)?)%"
+            | eval temp_f=tonumber(temp_f), rh=tonumber(rh)
+            | eval temp_c=(temp_f-32)*5/9
+            | eval svp=0.6108*exp((17.27*temp_c)/(temp_c+237.3))
+            | eval current_vpd=(1-rh/100)*svp
+            | stats latest(current_vpd) as current_vpd
+            | eval current_vpd=round(current_vpd,2)
+            | eval plant_list=split("Coffee|Green Tea|Jasmine|Cavendish Banana|Pink Lemonade Blueberry|Kale|Tobacco|Peppers|Corn|Black Pepper|Dahlias|Flowers","|")
+            | mvexpand plant_list
+            | rename plant_list as plant
+            | eval low_ref=case(
+                plant=="Coffee",0.8,
+                plant=="Green Tea",0.6,
+                plant=="Jasmine",0.8,
+                plant=="Cavendish Banana",0.9,
+                plant=="Pink Lemonade Blueberry",0.6,
+                plant=="Kale",0.7,
+                plant=="Tobacco",0.9,
+                plant=="Peppers",0.8,
+                plant=="Corn",0.8,
+                plant=="Black Pepper",0.6,
+                plant=="Dahlias",0.8,
+                plant=="Flowers",0.8
+              )
+            | eval high_ref=case(
+                plant=="Coffee",1.2,
+                plant=="Green Tea",1.0,
+                plant=="Jasmine",1.2,
+                plant=="Cavendish Banana",1.5,
+                plant=="Pink Lemonade Blueberry",1.1,
+                plant=="Kale",1.0,
+                plant=="Tobacco",1.2,
+                plant=="Peppers",1.2,
+                plant=="Corn",1.3,
+                plant=="Black Pepper",0.9,
+                plant=="Dahlias",1.2,
+                plant=="Flowers",1.2
+              )
+            | eval in_range=if(current_vpd&gt;=low_ref AND current_vpd&lt;=high_ref,1,0)
+            | stats sum(in_range) as value
+            | fields value
+          </query>
+        </search>
+        <option name="unit">plants</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0xd41f1f","0xf8be34","0x118832"]</option>
+        <option name="rangeValues">[0,6]</option>
+        <option name="useColors">1</option>
+      </single>
+    </panel>
+
+    <panel>
+      <single>
+        <title>Plants In Temp/RH Range</title>
+        <search>
+          <query>
+            index=greenhouse sourcetype="greenhouse:log" earliest=-2h
+            | rex field=_raw "-\s(?&lt;temp_f&gt;\d+(?:\.\d+)?)°F\s(?&lt;rh&gt;\d+(?:\.\d+)?)%"
+            | eval temp_f=tonumber(temp_f), rh=tonumber(rh)
+            | stats latest(temp_f) as temp_f latest(rh) as rh
+            | eval plant_list=split("Coffee|Green Tea|Jasmine|Cavendish Banana|Pink Lemonade Blueberry|Kale|Tobacco|Peppers|Corn|Black Pepper|Dahlias|Flowers","|")
+            | mvexpand plant_list
+            | rename plant_list as plant
+            | eval temp_low=case(
+                plant=="Coffee",60,
+                plant=="Green Tea",55,
+                plant=="Jasmine",60,
+                plant=="Cavendish Banana",70,
+                plant=="Pink Lemonade Blueberry",45,
+                plant=="Kale",45,
+                plant=="Tobacco",65,
+                plant=="Peppers",65,
+                plant=="Corn",60,
+                plant=="Black Pepper",70,
+                plant=="Dahlias",60,
+                plant=="Flowers",55
+              )
+            | eval temp_high=case(
+                plant=="Coffee",75,
+                plant=="Green Tea",75,
+                plant=="Jasmine",80,
+                plant=="Cavendish Banana",95,
+                plant=="Pink Lemonade Blueberry",80,
+                plant=="Kale",75,
+                plant=="Tobacco",85,
+                plant=="Peppers",85,
+                plant=="Corn",95,
+                plant=="Black Pepper",90,
+                plant=="Dahlias",80,
+                plant=="Flowers",80
+              )
+            | eval rh_low=case(
+                plant=="Coffee",50,
+                plant=="Green Tea",40,
+                plant=="Jasmine",50,
+                plant=="Cavendish Banana",60,
+                plant=="Pink Lemonade Blueberry",40,
+                plant=="Kale",40,
+                plant=="Tobacco",50,
+                plant=="Peppers",50,
+                plant=="Corn",40,
+                plant=="Black Pepper",60,
+                plant=="Dahlias",50,
+                plant=="Flowers",45
+              )
+            | eval rh_high=case(
+                plant=="Coffee",70,
+                plant=="Green Tea",70,
+                plant=="Jasmine",70,
+                plant=="Cavendish Banana",90,
+                plant=="Pink Lemonade Blueberry",65,
+                plant=="Kale",70,
+                plant=="Tobacco",75,
+                plant=="Peppers",75,
+                plant=="Corn",70,
+                plant=="Black Pepper",85,
+                plant=="Dahlias",70,
+                plant=="Flowers",70
+              )
+            | eval in_range=if(temp_f&gt;=temp_low AND temp_f&lt;=temp_high AND rh&gt;=rh_low AND rh&lt;=rh_high,1,0)
+            | stats sum(in_range) as value
+            | fields value
+          </query>
+        </search>
+        <option name="unit">plants</option>
+      </single>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <table>
+        <title>Plant Environment Reference vs Current</title>
+        <search>
+          <query>
+            index=greenhouse sourcetype="greenhouse:log" earliest=-2h
+            | rex field=_raw "-\s(?&lt;temp_f&gt;\d+(?:\.\d+)?)°F\s(?&lt;rh&gt;\d+(?:\.\d+)?)%"
+            | eval temp_f=tonumber(temp_f), rh=tonumber(rh)
+            | stats latest(temp_f) as temp_f latest(rh) as rh
+            | eval plant_list=split("Coffee|Green Tea|Jasmine|Cavendish Banana|Pink Lemonade Blueberry|Kale|Tobacco|Peppers|Corn|Black Pepper|Dahlias|Flowers","|")
+            | mvexpand plant_list
+            | rename plant_list as plant
+            | eval temp_low=case(
+                plant=="Coffee",60,
+                plant=="Green Tea",55,
+                plant=="Jasmine",60,
+                plant=="Cavendish Banana",70,
+                plant=="Pink Lemonade Blueberry",45,
+                plant=="Kale",45,
+                plant=="Tobacco",65,
+                plant=="Peppers",65,
+                plant=="Corn",60,
+                plant=="Black Pepper",70,
+                plant=="Dahlias",60,
+                plant=="Flowers",55
+              )
+            | eval temp_high=case(
+                plant=="Coffee",75,
+                plant=="Green Tea",75,
+                plant=="Jasmine",80,
+                plant=="Cavendish Banana",95,
+                plant=="Pink Lemonade Blueberry",80,
+                plant=="Kale",75,
+                plant=="Tobacco",85,
+                plant=="Peppers",85,
+                plant=="Corn",95,
+                plant=="Black Pepper",90,
+                plant=="Dahlias",80,
+                plant=="Flowers",80
+              )
+            | eval rh_low=case(
+                plant=="Coffee",50,
+                plant=="Green Tea",40,
+                plant=="Jasmine",50,
+                plant=="Cavendish Banana",60,
+                plant=="Pink Lemonade Blueberry",40,
+                plant=="Kale",40,
+                plant=="Tobacco",50,
+                plant=="Peppers",50,
+                plant=="Corn",40,
+                plant=="Black Pepper",60,
+                plant=="Dahlias",50,
+                plant=="Flowers",45
+              )
+            | eval rh_high=case(
+                plant=="Coffee",70,
+                plant=="Green Tea",70,
+                plant=="Jasmine",70,
+                plant=="Cavendish Banana",90,
+                plant=="Pink Lemonade Blueberry",65,
+                plant=="Kale",70,
+                plant=="Tobacco",75,
+                plant=="Peppers",75,
+                plant=="Corn",70,
+                plant=="Black Pepper",85,
+                plant=="Dahlias",70,
+                plant=="Flowers",70
+              )
+            | eval temp_status=case(
+                temp_f&lt;temp_low,"🔵 Too Cold",
+                temp_f&gt;temp_high,"🔴 Too Hot",
+                true(),"🟢 OK"
+              )
+            | eval humidity_status=case(
+                rh&lt;rh_low,"🟡 Too Dry",
+                rh&gt;rh_high,"🔵 Too Humid",
+                true(),"🟢 OK"
+              )
+            | eval alarm=case(
+                temp_f&lt;temp_low,"TEMP LOW",
+                temp_f&gt;temp_high,"TEMP HIGH",
+                rh&lt;rh_low,"RH LOW",
+                rh&gt;rh_high,"RH HIGH",
+                true(),"OK"
+              )
+            | eval temp_range=temp_low." - ".temp_high." °F"
+            | eval rh_range=rh_low." - ".rh_high." %"
+            | table plant temp_range rh_range temp_f rh temp_status humidity_status alarm
+            | rename plant as "Plant", temp_range as "Temp Range", rh_range as "Humidity Range", temp_f as "Current Temp", rh as "Current RH", temp_status as "Temp Status", humidity_status as "Humidity Status", alarm as "Alarm"
+          </query>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <table>
+        <title>Plant VPD Reference vs Current</title>
+        <search>
+          <query>
+            index=greenhouse sourcetype="greenhouse:log" earliest=-2h
+            | rex field=_raw "-\s(?&lt;temp_f&gt;\d+(?:\.\d+)?)°F\s(?&lt;rh&gt;\d+(?:\.\d+)?)%"
+            | eval temp_f=tonumber(temp_f), rh=tonumber(rh)
+            | eval temp_c=(temp_f-32)*5/9
+            | eval svp=0.6108*exp((17.27*temp_c)/(temp_c+237.3))
+            | eval current_vpd=(1-rh/100)*svp
+            | stats latest(current_vpd) as current_vpd
+            | eval current_vpd=round(current_vpd,2)
+            | eval plant_list=split("Coffee|Green Tea|Jasmine|Cavendish Banana|Pink Lemonade Blueberry|Kale|Tobacco|Peppers|Corn|Black Pepper|Dahlias|Flowers","|")
+            | mvexpand plant_list
+            | rename plant_list as plant
+            | eval low_ref=case(
+                plant=="Coffee",0.8,
+                plant=="Green Tea",0.6,
+                plant=="Jasmine",0.8,
+                plant=="Cavendish Banana",0.9,
+                plant=="Pink Lemonade Blueberry",0.6,
+                plant=="Kale",0.7,
+                plant=="Tobacco",0.9,
+                plant=="Peppers",0.8,
+                plant=="Corn",0.8,
+                plant=="Black Pepper",0.6,
+                plant=="Dahlias",0.8,
+                plant=="Flowers",0.8
+              )
+            | eval high_ref=case(
+                plant=="Coffee",1.2,
+                plant=="Green Tea",1.0,
+                plant=="Jasmine",1.2,
+                plant=="Cavendish Banana",1.5,
+                plant=="Pink Lemonade Blueberry",1.1,
+                plant=="Kale",1.0,
+                plant=="Tobacco",1.2,
+                plant=="Peppers",1.2,
+                plant=="Corn",1.3,
+                plant=="Black Pepper",0.9,
+                plant=="Dahlias",1.2,
+                plant=="Flowers",1.2
+              )
+            | eval ref_range=tostring(low_ref)." - ".tostring(high_ref)." kPa"
+            | eval status=case(
+                current_vpd&lt;low_ref,"🔵 Below Range",
+                current_vpd&gt;high_ref,"🔴 Above Range",
+                true(),"🟢 In Range"
+              )
+            | table plant ref_range current_vpd status
+            | rename plant as "Plant", ref_range as "Reference Range", current_vpd as "Current VPD", status as "Status"
+          </query>
+        </search>
+        <option name="count">15</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+  <!-- =========================
+       ALERTS / PATTERNS
+       ========================= -->
+
+  <row>
+    <panel>
+      <table>
+        <title>Recent Alert Events</title>
+        <search>
+          <query>
+            index=greenhouse sourcetype="greenhouse:log" earliest=-7d@d
+            | rex field=_raw "-\s(?&lt;temp_f&gt;\d+(?:\.\d+)?)°F\s(?&lt;rh&gt;\d+(?:\.\d+)?)%"
+            | eval temp_f=tonumber(temp_f), rh=tonumber(rh)
+            | eval alert=case(
+                temp_f&gt;95,"High Temp",
+                temp_f&lt;45,"Low Temp",
+                rh&gt;90,"High Humidity",
+                rh&lt;30,"Low Humidity"
+              )
+            | where isnotnull(alert)
+            | eval temp_f=round(temp_f,1), rh=round(rh,1)
+            | table _time temp_f rh alert
+            | rename temp_f as "Temp (°F)", rh as "Humidity (%)", alert as "Alert"
+            | sort - _time
+            | head 25
+          </query>
+        </search>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+
+    <panel>
+      <chart>
+        <title>Alert Count by Day</title>
+        <search>
+          <query>
+            index=greenhouse sourcetype="greenhouse:log" earliest=-14d@d
+            | rex field=_raw "-\s(?&lt;temp_f&gt;\d+(?:\.\d+)?)°F\s(?&lt;rh&gt;\d+(?:\.\d+)?)%"
+            | eval temp_f=tonumber(temp_f), rh=tonumber(rh)
+            | eval alert=case(
+                temp_f&gt;95,"High Temp",
+                temp_f&lt;45,"Low Temp",
+                rh&gt;90,"High Humidity",
+                rh&lt;30,"Low Humidity"
+              )
+            | where isnotnull(alert)
+            | timechart span=1d count by alert useother=f
+          </query>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <chart>
+        <title>Average Temperature by Hour of Day (7d)</title>
+        <search>
+          <query>
+            index=greenhouse sourcetype="greenhouse:log" earliest=-7d@d
+            | rex field=_raw "-\s(?&lt;temp_f&gt;\d+(?:\.\d+)?)°F\s(?&lt;rh&gt;\d+(?:\.\d+)?)%"
+            | eval temp_f=tonumber(temp_f)
+            | eval hour=strftime(_time,"%H")
+            | stats avg(temp_f) as avg_temp by hour
+            | sort hour
+          </query>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+
+    <panel>
+      <chart>
+        <title>Average Humidity by Hour of Day (7d)</title>
+        <search>
+          <query>
+            index=greenhouse sourcetype="greenhouse:log" earliest=-7d@d
+            | rex field=_raw "-\s(?&lt;temp_f&gt;\d+(?:\.\d+)?)°F\s(?&lt;rh&gt;\d+(?:\.\d+)?)%"
+            | eval rh=tonumber(rh)
+            | eval hour=strftime(_time,"%H")
+            | stats avg(rh) as avg_rh by hour
+            | sort hour
+          </query>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+
+  <!-- =========================
+       OUTDOOR SNAPSHOT
+       ========================= -->
+
+  <row>
+    <panel>
+      <title>Outdoor Conditions</title>
+
+      <single>
+        <title>Outdoor Temp</title>
+        <search base="base_outdoor">
+          <query>| stats latest(outdoor_temp_f) as value | eval value=round(value,1) | fields value</query>
+        </search>
+        <option name="unit">°F</option>
+      </single>
+
+      <single>
+        <title>Feels Like</title>
+        <search base="base_outdoor">
+          <query>| stats latest(outdoor_feelslike_f) as value | eval value=round(value,1) | fields value</query>
+        </search>
+        <option name="unit">°F</option>
+      </single>
+
+      <single>
+        <title>Humidity</title>
+        <search base="base_outdoor">
+          <query>| stats latest(outdoor_humidity) as value | fields value</query>
+        </search>
+        <option name="unit">%</option>
+      </single>
+
+      <single>
+        <title>Wind</title>
+        <search base="base_outdoor">
+          <query>| stats latest(outdoor_wind_mph) as value | eval value=round(value,1) | fields value</query>
+        </search>
+        <option name="unit">mph</option>
+      </single>
+
+      <single>
+        <title>UV Index</title>
+        <search base="base_outdoor">
+          <query>| stats latest(outdoor_uv) as value | fields value</query>
+        </search>
+      </single>
+
+      <single>
+        <title>Pressure</title>
+        <search base="base_outdoor">
+          <query>| stats latest(outdoor_pressure_in) as value | eval value=round(value,2) | fields value</query>
+        </search>
+        <option name="unit">in</option>
+      </single>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <table>
+        <title>Sun / Moon Times</title>
+        <search>
+          <query>
+            index=greenhouse sourcetype="greenhouse:api:json"
+            | stats latest(sunrise) as Sunrise latest(sunset) as Sunset latest(moonrise) as Moonrise latest(moonset) as Moonset latest(moon_illumination) as "Moon Illumination (%)"
+          </query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+
+    <panel>
+      <table>
+        <title>Source Freshness</title>
+        <search>
+          <query>
+            index=greenhouse sourcetype="greenhouse:log"
+            | stats latest(_time) as last_seen
+            | eval source="Greenhouse Logger"
+            | append [
+                search index=greenhouse sourcetype="greenhouse:api:json"
+                | stats latest(_time) as last_seen
+                | eval source="Weather API"
+              ]
+            | eval "Minutes Since Update"=round((now()-last_seen)/60,1)
+            | eval "Last Seen"=strftime(last_seen,"%Y-%m-%d %H:%M:%S")
+            | table source "Last Seen" "Minutes Since Update"
+            | rename source as "Source"
+          </query>
+        </search>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</form>
