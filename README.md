@@ -45,6 +45,8 @@ Supports environmental targets for:
 - Dahlias
 - Flowers
 
+Can be configured later for any plant type you like.
+
 Each plant includes:
 
 - Recommended temperature range
